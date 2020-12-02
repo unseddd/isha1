@@ -1,5 +1,9 @@
 #![no_std]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 use core::convert::TryInto;
 
 /// SHA-1 Errors
@@ -13,7 +17,7 @@ pub enum Error {
 pub const WORD_BITS_LEN: usize = 32;
 
 // Word length in bytes
-const WORD_BYTES_LEN: usize = 4;
+pub const WORD_BYTES_LEN: usize = 4;
 
 // Number of 32-bit words used to process blocks
 const W_LEN: usize = 80;
@@ -57,6 +61,26 @@ impl Sha1 {
     pub fn new() -> Self {
         Self {
             state: INITIAL_STATE,
+            block: [0_u8; BLOCK_BYTES_LEN],
+            index: 0,
+            total_len: 0,
+        }
+    }
+
+    /// Interface for custom initialization of the SHA-1 state
+    ///
+    /// Only used for convenience in Cryptopals challenge #29
+    ///
+    /// NEVER actually do this in practice
+    pub fn from_digest(mac: &[u8; DIGEST_LEN]) -> Self {
+        let mut state = [0_u32; INTERMEDIATE_BLOCKS];
+
+        for (i, w) in mac.chunks_exact(WORD_BYTES_LEN).enumerate() {
+            state[i] = u32::from_be_bytes(w.try_into().unwrap());
+        }
+
+        Self {
+            state: state,
             block: [0_u8; BLOCK_BYTES_LEN],
             index: 0,
             total_len: 0,
@@ -187,9 +211,43 @@ impl Sha1 {
     /// Compute the final digest
     ///
     /// Resets the internal state to the initial state
-    fn finalize(&mut self) -> Result<[u8; DIGEST_LEN], Error> {
+    pub fn finalize(&mut self) -> Result<[u8; DIGEST_LEN], Error> {
         if self.index < BLOCK_BYTES_LEN {
             let old_len = self.index;
+
+            // pad and process the padded block
+            self.pad()?;
+            self.process_block();
+
+            if old_len > BLOCK_BYTES_LEN - PAD_AND_LENGTH_LEN {
+                // there wasn't enough room to include the message bit-length
+                // process a full block of padding
+                self.full_pad();
+                self.process_block();
+            }
+        }
+
+        let mut res = [0_u8; DIGEST_LEN];
+
+        for (i, word) in self.state.iter().enumerate() {
+            res[i * WORD_BYTES_LEN..(i + 1) * WORD_BYTES_LEN]
+                .copy_from_slice(word.to_be_bytes().as_ref());
+        }
+
+        self.reset();
+
+        Ok(res)
+    }
+
+    /// Compute the final digest using a forged value for the total message length
+    ///
+    /// NEVER actually do this, only for Cryptopals challenge #29
+    pub fn finalize_insecure(&mut self, forged_total_len: u64) -> Result<[u8; DIGEST_LEN], Error> {
+        if self.index < BLOCK_BYTES_LEN {
+            let old_len = self.index;
+
+            // forge the total message length
+            self.total_len = forged_total_len;
 
             // pad and process the padded block
             self.pad()?;
@@ -223,13 +281,23 @@ impl Sha1 {
 
     // Pad a message to next block-length bytes
     fn pad(&mut self) -> Result<(), Error> {
-        let pad_len = BLOCK_BYTES_LEN - self.index;
+        Self::inner_pad(&mut self.block, self.index, self.total_len)
+    }
 
+    fn inner_pad(
+        block: &mut [u8; BLOCK_BYTES_LEN],
+        index: usize,
+        total_len: u64,
+    ) -> Result<(), Error> {
+        let pad_len = BLOCK_BYTES_LEN - index;
+
+        // check that we are not padding a full block
+        // total_len is a u64, so can't be more than u64::MAX
         if pad_len == 0 {
             return Err(Error::InvalidLength);
         }
 
-        self.block[self.index] = PAD_START;
+        block[index] = PAD_START;
 
         // the end position of zero-byte padding
         let zero_pad_end = if pad_len > PAD_AND_LENGTH_LEN {
@@ -241,24 +309,72 @@ impl Sha1 {
         };
 
         if pad_len > 1 {
-            // will pad with zeroes, or a no-op if pos + 1 == zero_pad_end
-            zero_bytes(&mut self.block[self.index + 1..zero_pad_end]);
+            // will pad with zeroes, or a no-op if index + 1 == zero_pad_end
+            zero_bytes(&mut block[index + 1..zero_pad_end]);
         }
 
         if pad_len >= PAD_AND_LENGTH_LEN {
             // add the message bits length
-            self.block[BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN..]
-                .copy_from_slice(self.total_len.to_be_bytes().as_ref());
+            block[BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN..]
+                .copy_from_slice(total_len.to_be_bytes().as_ref());
         }
 
         Ok(())
     }
 
+    /// Pad a message using SHA-1 formatting
+    ///
+    /// Only return the padding
+    pub fn pad_message(msg: &[u8]) -> Result<Vec<u8>, Error> {
+        let msg_len = msg.len();
+
+        if msg_len == 0 || msg_len * 8 > core::u64::MAX as usize {
+            return Err(Error::InvalidLength);
+        }
+
+        let total_len = (msg_len * 8) as u64;
+        let mut pad_block = [0_u8; BLOCK_BYTES_LEN];
+
+        let end_len = if msg_len % BLOCK_BYTES_LEN == 0 {
+            // add full block of padding
+            Self::inner_pad(&mut pad_block, 0, total_len)?;
+            0
+        } else if msg_len < BLOCK_BYTES_LEN {
+            // copy message to padding block
+            Self::inner_pad(&mut pad_block, msg_len, total_len)?;
+            msg_len
+        } else {
+            // message is larger than a full block
+            // non-modulo the block length
+            let last_len = msg_len % BLOCK_BYTES_LEN;
+            Self::inner_pad(&mut pad_block, last_len, total_len)?;
+            last_len
+        };
+
+        let mut res: Vec<u8> = Vec::with_capacity(BLOCK_BYTES_LEN * 2);
+
+        // add the padding block to the result
+        res.extend_from_slice(&pad_block[end_len..]);
+
+        if end_len > BLOCK_BYTES_LEN - PAD_AND_LENGTH_LEN {
+            // not enough space to write the total bit length
+            // add a block full of zeroes + total bit length
+            Self::inner_full_pad(&mut pad_block, total_len);
+            res.extend_from_slice(&pad_block);
+        }
+
+        Ok(res)
+    }
+
     // Add a full block of padding
     fn full_pad(&mut self) {
-        zero_bytes(&mut self.block[..BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN]);
-        self.block[BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN..]
-            .copy_from_slice(self.total_len.to_be_bytes().as_ref());
+        Self::inner_full_pad(&mut self.block, self.total_len);
+    }
+
+    fn inner_full_pad(block: &mut [u8; BLOCK_BYTES_LEN], total_len: u64) {
+        zero_bytes(&mut block[..BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN]);
+        block[BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN..]
+            .copy_from_slice(total_len.to_be_bytes().as_ref());
     }
 
     // Constant bitwise operations over b, c, and d
@@ -331,6 +447,77 @@ mod tests {
         sha.pad().unwrap();
 
         assert_eq!(sha.block, expected_block);
+    }
+
+    #[test]
+    fn check_pad_message() {
+        let test_bytes = [0x61, 0x62, 0x63, 0x64, 0x65];
+
+        let expected_block = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x28,
+        ];
+
+        let mut padded_block = Sha1::pad_message(test_bytes.as_ref()).unwrap();
+
+        assert_eq!(padded_block[..], expected_block[..]);
+        assert_eq!(expected_block.len(), 59);
+
+        let expected_block_lg = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xd8,
+        ];
+
+        let padded_block_lg = Sha1::pad_message(&padded_block).unwrap();
+
+        assert_eq!(padded_block_lg[..], expected_block_lg[..]);
+
+        // pad a block larger than full block, non-modulo the block length
+        // still has enough room to write padding start and total bit length in one padding block
+        padded_block.extend_from_slice([0x61; 60].as_ref());
+
+        let expected_block_lg_non_mod = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xb8];
+
+        let padded_block_lg_non_mod = Sha1::pad_message(&padded_block).unwrap();
+
+        assert_eq!(padded_block_lg_non_mod[..], expected_block_lg_non_mod[..]);
+
+        let expected_block_lg_non_mod_full_pad = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x03, 0xc0,
+        ];
+
+        // add one extra byte to require a full padding block of zeroes
+        padded_block.push(0x61);
+
+        let padded_block_lg_non_mod_full_pad = Sha1::pad_message(&padded_block).unwrap();
+
+        assert_eq!(
+            padded_block_lg_non_mod_full_pad[..],
+            expected_block_lg_non_mod_full_pad[..]
+        );
+
+        let a_block = [0x61; 93];
+        let expected_a_pad = [
+            0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xe8,
+        ];
+
+        let pad_a = Sha1::pad_message(a_block.as_ref()).unwrap();
+
+        assert_eq!(pad_a[..], expected_a_pad[..]);
+        assert_eq!(pad_a.len(), 35);
     }
 
     #[test]
