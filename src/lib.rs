@@ -120,37 +120,10 @@ impl Sha1 {
         Ok(())
     }
 
-    /// Compute the SHA-1 digest of the given message
-    ///
-    /// Message length must be below UINT64_MAX:
-    ///
-    /// - 18_446_744_073_709_551_615 bits
-    /// - 2_305_843_009_213_693_952 bytes
+    /// Convenience function to compute the SHA-1 digest of the given message
     pub fn digest(msg: &[u8]) -> Result<[u8; DIGEST_LEN], Error> {
         let mut sha = Self::new();
-        let msg_len = msg.len();
-
-        let msg_len_bits = (msg_len * 8) as u64;
-
-        // Unlikely to ever happen, but just in case
-        if msg_len_bits > core::u64::MAX {
-            return Err(Error::InvalidLength);
-        }
-
-        // set the total message length
-        sha.total_len = msg_len_bits;
-
-        for block in msg.chunks(BLOCK_BYTES_LEN) {
-            let block_len = block.len();
-
-            sha.block[..block_len].copy_from_slice(block);
-            sha.index += block_len;
-
-            if sha.index == BLOCK_BYTES_LEN {
-                sha.process_block();
-            }
-        }
-
+        sha.input(&msg)?;
         sha.finalize()
     }
 
