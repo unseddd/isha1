@@ -1,3 +1,18 @@
+/* This library is dual-licensed under the original license from
+ * RFC-3174 and WTFPL
+ *
+ * No direct code from the RFC is used, but this is a port to Rust
+ * of the code contained in the RFC (with some changes).
+ *
+ * Any mistakes are my own.
+ *
+ * All due credit and appreciation to the original authors
+ */
+
+Copyright (C) The Internet Society (2001).  All Rights Reserved.
+
+---------------------------------------------------------------------
+
          DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE 
                     Version 2, December 2004 
 
