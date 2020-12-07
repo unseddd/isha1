@@ -13,6 +13,9 @@ pub enum Error {
     FullPad,
 }
 
+/// Digest length in bytes (160-bits)
+pub const DIGEST_LEN: usize = 20;
+
 // Word length in bits
 pub const WORD_BITS_LEN: usize = 32;
 
@@ -28,17 +31,19 @@ const BLOCK_BYTES_LEN: usize = 64;
 // Byte-length to represent the Bit-length of the message
 const MSG_BITS_LENGTH_LEN: usize = 8;
 
-// Length of the minimum amount of padding bytes (0x1 || MSG_BITS_LEN(8))
+// Length of the minimum amount of padding bytes (0x80 || MSG_BITS_LEN(8))
 const PAD_AND_LENGTH_LEN: usize = 9;
-
-/// Digest length in bytes (160-bits)
-pub const DIGEST_LEN: usize = 20;
 
 // Number of intermdiate state blocks (DIGEST_LEN / 4)
 const INTERMEDIATE_BLOCKS: usize = 5;
 
 const PAD_START: u8 = 0x80;
-const ZERO_PAD: u8 = 0x0;
+
+// Zero-filled block
+const ZERO_BLOCK: [u8; BLOCK_BYTES_LEN] = [0_u8; BLOCK_BYTES_LEN];
+
+// Zero-filled work buffer
+const ZERO_WORK: [u32; W_LEN] = [0_u32; W_LEN];
 
 // Initial state of the SHA-1 digest
 const INITIAL_STATE: [u32; INTERMEDIATE_BLOCKS] =
@@ -152,7 +157,7 @@ impl Sha1 {
     // Process a block, updating the internal state
     // FIXME: also implement the queued version mentioned in the RFC for space-constrained devices
     fn process_block(&mut self) {
-        let mut w = [0_32; W_LEN];
+        let mut w = [0_u32; W_LEN];
 
         // initialize the first 16 words from the message block
         for (t, b) in self.block.chunks_exact(WORD_BYTES_LEN).enumerate() {
@@ -198,12 +203,16 @@ impl Sha1 {
             *word = ((*word as u64 + temp) & 0xffff_ffff) as u32;
         }
 
-        zero_block(&mut self.block);
+        // clear any potentially sensitive material
+        Self::zero_work(&mut w);
+        Self::zero_block(&mut self.block);
+
         self.index = 0;
     }
 
     // Rotate a given 32-bit word by s bits
     // Equivalent to: (word << s) | (word >> (32 - s))
+    #[inline(always)]
     fn circular_shift(s: u32, word: u32) -> u32 {
         word.rotate_left(s)
     }
@@ -275,8 +284,10 @@ impl Sha1 {
 
     /// Reset the internal state to the initial state
     pub fn reset(&mut self) {
-        zero_block(&mut self.block);
+        Self::zero_block(&mut self.block);
         self.state.copy_from_slice(INITIAL_STATE.as_ref());
+        self.index = 0;
+        self.total_len = 0;
     }
 
     // Pad a message to next block-length bytes
@@ -310,7 +321,7 @@ impl Sha1 {
 
         if pad_len > 1 {
             // will pad with zeroes, or a no-op if index + 1 == zero_pad_end
-            zero_bytes(&mut block[index + 1..zero_pad_end]);
+            Self::zero_bytes(&mut block[index + 1..zero_pad_end]);
         }
 
         if pad_len >= PAD_AND_LENGTH_LEN {
@@ -372,7 +383,7 @@ impl Sha1 {
     }
 
     fn inner_full_pad(block: &mut [u8; BLOCK_BYTES_LEN], total_len: u64) {
-        zero_bytes(&mut block[..BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN]);
+        Self::zero_bytes(&mut block[..BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN]);
         block[BLOCK_BYTES_LEN - MSG_BITS_LENGTH_LEN..]
             .copy_from_slice(total_len.to_be_bytes().as_ref());
     }
@@ -398,26 +409,32 @@ impl Sha1 {
     // t must be between 0..=79
     fn k(t: usize) -> u32 {
         match t {
-            0..=19 => 0x5a827999,
-            20..=39 => 0x6ed9eba1,
-            40..=59 => 0x8f1bbcdc,
-            60..=79 => 0xca62c1d6,
+            0..=19 => 0x5a82_7999,
+            20..=39 => 0x6ed_9eba1,
+            40..=59 => 0x8f1b_bcdc,
+            60..=79 => 0xca62_c1d6,
             _ => unreachable!("invalid value of t: {}", t),
         }
     }
-}
 
-/// Zero a block that potentially contains sensitive material
-pub fn zero_block(block: &mut [u8; BLOCK_BYTES_LEN]) {
-    block.copy_from_slice([0_u8; BLOCK_BYTES_LEN].as_ref());
-}
-
-/// Fill a slice with zeroes
-///
-/// Slower than memcpy used by `copy_from_slice`, but handles arbitrary slice lengths
-pub fn zero_bytes(buf: &mut [u8]) {
-    for byte in buf.iter_mut() {
-        *byte = ZERO_PAD;
+    // Zero a block that potentially contains sensitive material
+    #[inline(always)]
+    fn zero_block(block: &mut [u8; BLOCK_BYTES_LEN]) {
+        block.copy_from_slice(ZERO_BLOCK.as_ref());
+    }
+    
+    // Zero a work buffer that potentially contains sensitive material
+    #[inline(always)]
+    fn zero_work(work: &mut [u32; W_LEN]) {
+        work.copy_from_slice(ZERO_WORK.as_ref());
+    }
+    
+    // Fill a slice with zeroes
+    //
+    // Guaranteed less or equal to block length at compile time
+    #[inline(always)]
+    fn zero_bytes(buf: &mut [u8]) {
+        buf.copy_from_slice(&ZERO_BLOCK[..buf.len()]);
     }
 }
 
